@@ -1,42 +1,34 @@
-# Unity Game Text Localization (Codex Skill)
+# Unity Game Text Localization Skill
 
-A reusable Codex/Claude skill for extracting Japanese text from Unity games (including adult titles) and producing a playable Chinese localization. Distilled from a real end-to-end project.
+Agent-neutral skill for extracting, translating, and back-filling text in Unity games. It works across Mono and IL2CPP builds and does not assume a fixed language pair, genre, localization system, or runtime hook.
 
 ## What it covers
 
-- Unity asset structure analysis & text discovery (UnityPy + TypeTreeGenerator)
-- Corpus extraction with dedup, SHA-256 IDs, and full source-location tracking
-- Local Sakura (llama-server) translation with strict validation:
-  - placeholder protection for rich-text/params/separators
-  - line/order/multiplicity checks, prompt-leakage rejection, segment fallback
-  - resumable append-only checkpoints bound to a glossary hash
-- Independent asset overlay (source game dir stays read-only, byte-verified)
-- BepInEx runtime loader: exact-match UGUI dictionary, UGUI/TMP font replacement, Utage font-only
-- Isolated-copy smoke verification with in-game evidence
+- Build inventory and text-source discovery
+- Localization tables, external data, serialized assets, AssetBundles, Addressables
+- UI text, code strings, dynamic text, and text baked into media
+- Corpus extraction with context, placeholders, and source locations
+- Translation provider selection, glossaries, QA, and structural validation
+- Native table patching, asset overlay, runtime hooks, font/UI adaptation
+- Isolated-copy verification and reproducible manifests
 
-## Pitfalls captured
+## Agent compatibility
 
-- Online strong models plan/analyze well but **adult content triggers their content filters** — do the translation with local Sakura instead.
-- Glossary substring pollution (`ロード→读取` breaks `ダウンロード`) — longest-match-first, add long forms explicitly.
-- Model "rambling" (fills the full token budget without EOS) burns minutes per retry — **curate the last ~10–20 stubborn entries by hand/agent instead of retrying**.
-- Font style matching: identify the original font (e.g. rounded gothic) and pick a matching Chinese font (e.g. YouYuan); pre-check glyph coverage with GDI; **TMP runtime font creation only works via the 3-arg `CreateFontAsset(familyName, styleName, pointSize)` overload** (8-arg/DynamicOS return null in Player builds).
+The skill uses the common `SKILL.md` format:
 
-## Install
+- Codex: place under `$CODEX_HOME/skills` or `~/.codex/skills`
+- Claude Code: place under `~/.claude/skills` or a project skills directory
+- Hermes / Ekko: import through the profile skill manager, or copy into the configured skills directory
 
-Put the folder in your skill directory:
+Host-specific metadata is optional; unsupported fields can be ignored.
 
-```bash
-# Linux/macOS
-mkdir -p ~/.agents/skills
-cp -r unity-game-text-localization ~/.agents/skills/
+## Usage
 
-# or with $CODEX_HOME set
-cp -r unity-game-text-localization "$CODEX_HOME/skills/"
+Ask your agent:
+
+```text
+使用 unity-game-text-localization，从 <game-path> 提取文本并生成 <target-language> 本地化补丁
 ```
-
-Then ask your coding agent to use it, e.g.:
-
-> 用 unity-game-text-localization 技能，从 <game-path> 提取日文文本并汉化
 
 ## Layout
 
@@ -45,10 +37,12 @@ unity-game-text-localization/
 |-- SKILL.md
 `-- references/
     |-- workflow.md
+    |-- text-sources.md
+    |-- translation.md
+    |-- backfill.md
     `-- pitfalls.md
 ```
 
-## Notes
+## Safety
 
-- The original game directory is always read-only; everything is produced in independent directories.
-- Adult-content automation should only be run on targets the user explicitly authorizes.
+Only work on authorized copies. Do not bypass DRM, anti-cheat, encryption, or obfuscation. Keep the original game directory read-only and produce changes in an overlay or isolated copy.

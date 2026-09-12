@@ -1,37 +1,55 @@
 ---
 name: unity-game-text-localization
-description: Extract Japanese text from Unity games (including adult titles) and produce a playable Chinese localization: structure analysis, corpus extraction, local Sakura translation with strict validation, asset back-fill into an independent overlay, a BepInEx runtime loader, and style-matched font adaptation. Use for end-to-end Unity text extraction/localization work, not for ordinary game modding.
+description: Generic, agent-neutral workflow for extracting, translating, and back-filling text in Unity games across Mono and IL2CPP builds, localization tables, asset bundles, Addressables, UI components, code strings, and fonts. Use for any Unity text-localization task; not for non-Unity games or unrelated modding.
 metadata:
-  short-description: Unity 游戏文本提取与本地化（提取→本地翻译→回填→字体）
+  short-description: Unity 游戏文本提取与本地化通用流程
+  keywords:
+    - unity text extraction
+    - unity localization
+    - unity game translation
+    - unity asset patching
+    - unity il2cpp text
 ---
 
-# Unity 游戏文本提取与本地化
+# Unity 游戏文本本地化（通用版）
 
-面向 Unity 引擎游戏（含 DLsite 成人作品）的端到端本地化：结构分析 → 文本提取 → 本地 Sakura 翻译 → 严格校验 → 资源回填（独立 overlay）→ BepInEx 加载器 → 隔离副本验证。
+适用于任意 Unity 游戏的文本提取、翻译与回填。不要假设特定引擎版本、平台、语言对、文本存储方式或运行时方案；先盘点构建，再按证据选择策略。
 
-## 核心约束
+## 必守约束
 
-- **原游戏目录只读**：所有产出写入独立目录；回填只生成 overlay，不覆盖原文件。
-- **离线预翻译**：游戏运行时不调用模型；译文全部提前烘焙进资源 + 运行时静态字典。
-- **成人内容只对用户明确授权的目标操作**；不把特定作品信息写成通用规则。
+- 只处理用户明确授权的游戏副本；不得绕过 DRM、反作弊、加密或混淆。
+- 原游戏目录只读。所有修改写入独立 overlay、补丁包或隔离副本。
+- 不要只按 `TextAsset`、某个插件或某个本地化系统猜测；先做完整文本源盘点。
+- 保留格式控制、占位符、换行、富文本标签、参数和行序；译文不得破坏结构。
+- 任务范围要收敛：只要提取就不回填，只要译文就不改游戏，只要补丁就不额外发布。
+- 游戏文本包含敏感内容时，未经用户明确许可不得发送到在线模型或第三方服务。
 
-## 工作流概要
+## 最小输入
 
-1. **结构与文本定位**：UnityPy 枚举资产对象（MonoBehaviour/TextAsset/Utage），确认 Unity 版本与类型树兼容性，定位日文文本字段。
-2. **提取与建语料**：导出结构化 JSON；语料行 = `{id: sha256(text), text, category, locations[]}`，**id 由原文重算、不做归一化**；去重并聚合全部来源位置；保留格式控制（标签/参数/`/`分隔符/换行）。
-3. **本地翻译**：llama-server + Sakura 模型，严格校验管线（占位符保护、行数/顺序、prompt 泄漏拒绝、segment fallback）。**先小批试译校准术语表再全量**。
-4. **校验与收尾**：结构/质量审计；剩余顽固条目**直接人工/Agent 收尾**，不重复烧模型时间。
-5. **回填与加载器**：独立 overlay（源只读、哈希校验、未改对象字节不变）；BepInEx 插件做 UGUI/TMP 字体 + 运行时精确字典；Utage 剧情只改字体不替换文本。
-6. **验证**：隔离副本冒烟（日志/取证/截图），原游戏未动；状态写 `pending_full_playthrough`。
+能从上下文推断就不要反复询问；只确认缺失且影响结果的信息：
 
-## 关键决策（踩坑结论）
+- 游戏路径或构建目录
+- 源语言与目标语言
+- 期望产物：文本导出、双语语料、可安装补丁、隔离副本验证
+- 是否允许运行时 Hook、是否允许在线翻译
 
-- **模型分工**：规划/结构分析/提取用强推理模型效果好；但**成人内容会触发在线模型过滤**，正文翻译必须走本地 Sakura。
-- **术语表**：长词优先匹配，且把 `ダウンロード/プリロード/リロード` 等长词显式入表，否则短词（如 `ロード→读取`）污染长词。
-- **翻译收尾**：剩余十几条顽固条目（话痨截断、短串边界、降级丢术语）人工/Agent 收尾，别浪费 Sakura 时间与 token。
-- **字体**：先识别原字体风格（常见丸ゴシック→中文圆体如幼圆），GDI 做覆盖率预检防 □；TMP 运行时创建字体用三参 `CreateFontAsset(familyName, styleName, pointSize)` 重载（8 参/DynamicOS 在 Player 返回 null）。
+## 主流程
 
-## 详细资料
+1. **构建盘点**：确认 Unity 版本、平台、Mono/IL2CPP、资源布局、已有本地化系统、字体与加载器。
+2. **文本发现**：系统枚举本地化表、外部数据、序列化资产、AssetBundle/Addressables、UI 组件、代码字符串、动态文本和图片/音视频文本。
+3. **语料构建**：导出原文、上下文、精确位置、格式标记和 UI 约束；去重但保留所有来源。
+4. **翻译与校验**：使用用户许可的翻译方式，建立术语表、翻译记忆和结构校验。
+5. **回填策略**：优先原生本地化表，其次数据/资产补丁，最后运行时 Hook；字体和 UI 布局同步适配。
+6. **验证交付**：在隔离副本中验证哈希、日志、截图和覆盖率；明确未验证范围。
 
-- [端到端工作流](references/workflow.md)：提取、语料、翻译管线、回填、加载器、验证的完整做法与代码模式。
-- [踩坑记录](references/pitfalls.md)：模型选择与过滤、Sakura 问题、收尾策略、字体适配的具体教训。
+## 资料路由
+
+- 开始任何修改前读 [references/workflow.md](references/workflow.md)。
+- 做文本源盘点时读 [references/text-sources.md](references/text-sources.md)。
+- 做翻译、术语或质量校验时读 [references/translation.md](references/translation.md)。
+- 做补丁、字体、运行时 Hook 或打包时读 [references/backfill.md](references/backfill.md)。
+- 遇到反直觉问题、构建差异或验证失败时读 [references/pitfalls.md](references/pitfalls.md)。
+
+## 跨 Agent 兼容
+
+本技能只依赖通用文件读写、Shell、代码编辑和 Git 能力，不绑定 Codex、Claude 或 Hermes 的私有 API。不同宿主应按自身工具执行同一流程；引用文件使用相对路径。除 `name`、`description` 外的 frontmatter 元数据可被不支持的宿主忽略。

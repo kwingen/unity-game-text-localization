@@ -1,69 +1,129 @@
-# 端到端工作流
+# 通用端到端工作流
 
-## 0. 环境与工具
+## 0. 交付范围
 
-- Python 3.11+ 虚拟环境；`UnityPy`（1.25.x）+ `TypeTreeGeneratorAPI` 用于资产解析与类型树。
-- `llama-server`（CUDA 构建）+ Sakura 模型（如 `sakura-14b-qwen2.5-v1.0-iq4xs.gguf`），OpenAI 兼容端点仅限 `127.0.0.1` loopback；不用代理、不下发模型、不连第三方服务。
-- 游戏隔离副本用于验证；原游戏目录只读。
+先确认产物，不要默认“一步到位”：
 
-## 1. 结构与文本定位
+| 用户请求 | 必要产物 | 禁止事项 |
+|---|---|---|
+| 只要文本 | 结构化导出 + 覆盖率报告 | 不改游戏文件 |
+| 要翻译 | 双语语料 + QA 报告 | 不自动回填 |
+| 要可玩补丁 | overlay/补丁包 + 验证记录 | 不覆盖原目录 |
+| 要运行时方案 | 加载器/插件 + 隔离副本验证 | 不绕过保护机制 |
 
-1. 列出 `*_Data` 资产与根目录文件（`globalgamemanagers`、`level0`、`sharedassets0.assets`、`resources.assets`、`StreamingAssets`、`Managed` DLL、BepInEx 残留）。
-2. 用 UnityPy 枚举对象类型分布（MonoBehaviour/TextAsset/GameObject/Utage 相关），统计含日文字段的资产文件与对象数，确定文本载体。
-3. 确认 Unity 版本；类型树与运行时不匹配时用 `TypeTreeGeneratorAPI` 生成树。
+## 1. 构建盘点
 
-**类型树兼容坑（Unity 2021.1.x + UnityPy 1.25.3）**：
-- 生成器的 MonoBehaviour `m_Enabled` 字段缺四字节对齐标记；
-- `List<string>` 被标记成标量 `string`。
-- 对策：只在内存中修正这两处；用「原样字节往返」测试验证真实对象无损。
+产出 `inventory.json`，至少包含：
 
-## 2. 提取与建语料
+- 游戏路径、平台、构建时间或版本号
+- Unity 版本
+- Mono / IL2CPP / WebGL / 其他脚本后端
+- 关键目录：`*_Data`、`StreamingAssets`、`Managed`、`Resources`、Addressables、AssetBundle
+- 已有本地化系统、Mod 加载器、运行时补丁框架
+- 字体系统和 UI 框架线索
+- 初步风险：加密资源、反作弊、动态文本、图片文本
 
-- 导出结构化 JSON：每个对象 → `{file, path_id, class, name, fields}`；另建 `index.json`（对象清单）与 `coverage.json`。
-- 语料行：`{id: sha256(text), text: 精确原文, category, locations: [{file, path_id, field 路径, mode}]}`。**id 必须由原文重算**，不做空白/转义/Unicode 归一化。
-- 去重：相同文本合并，`locations` 聚合全部来源位置，支持逐处回填与追踪。
-- 保留格式控制：富文本标签 `<color=...>`、参数占位符 `<param=...>`、`{...}` 花括号、`\n` 字面与真实换行、`/` 分隔符——翻译时必须原样保留（占位符保护）。
+不要跳过盘点直接修改资源。若无法确定脚本后端或资源格式，先做只读检查并记录不确定项。
 
-## 3. 本地 Sakura 翻译管线
+## 2. 文本源发现
 
-### 启动与探活
-- 启动参数建议：`--ctx-size 4096 --parallel 1 --n-gpu-layers <按显存> --flash-attn on --offline`。
-- **先探测真实延迟再规划批量**：`--parallel 1` 单槽，一个慢请求（如 90s+）阻塞后续全部；测速要把排队算进去，别把排队误判成模型限速/网络故障。
+按 [text-sources.md](text-sources.md) 枚举所有可能来源，至少覆盖：
 
-### 请求与校验（不可省略）
-- 单条或小批量（≤4）请求，`temperature 0.1` 附近，显式 loopback endpoint。
-- 占位符机制：格式控制与术语表词替换为 `[[Pxxxx_xxxx]]`；译文必须原样保留全部占位符（顺序、多重性、行数、行序）。
-- 校验拒绝：占位符丢失/乱序/增删、行数不一致、代码块、JSON 包裹、解释性前缀、prompt 回显（leakage，如「将下面的日文文本翻译成中文：」）。
-- 降级路径：整条校验失败时，仅对「无保护的纯文本段」逐段重译（segment fallback），**绝不接受丢弃标记的整条响应**；fallback 段再次校验术语身份/顺序/多重性。
-- 断点续跑：输出 append-only JSONL，逐条 fsync；已有记录校验后跳过；`glossary_sha256` 绑定每条记录（**改术语表会让旧断点全部失效**，改表前先规划重跑范围与合并策略）。
+- 原生 Unity Localization / Addressables
+- CSV、JSON、XML、YAML、PO、XLIFF 等外部表
+- `TextAsset`
+- `MonoBehaviour` / `ScriptableObject`
+- UI 组件中的默认文本
+- 代码字符串和动态拼接
+- AssetBundle、Resource、StreamingAssets
+- 图片、音频、视频中的固定文本
 
-### 术语表
-- JSON 对象 `{日文词: 中文词}`；**按词长降序匹配**，最长优先保护。
-- 短词必须谨慎：`ロード→读取` 会截断 `ダウンロード/プリロード/リロード`。把这些长词显式入表（`ダウンロード→下载`、`プリロード→预加载`、`リロード→重新加载`）。
-- 校验：空词、含控制语法的词拒绝；术语命中计数用于质量审计。
+每类来源都记录：文件、对象 ID、字段路径、文本语言、上下文、是否可写、回填难度。
 
-## 4. 校验与收尾
+## 3. 语料构建
 
-- 合并多轮输出按优先级覆盖（人工校订 > 最新模型轮 > 旧模型轮），每条做结构与来源校验（标签/占位符/分隔符/行数）。
-- 质量审计项：未翻译（原文==译文）、残留假名、prompt 泄漏、人名不一致、术语命中一致性、结构标记数量。
-- **收尾策略**：剩余个位数到十几条顽固失败直接人工/Agent 校订（curated entries），结构校验照旧。分类决策：术语污染类 → 改术语表后重跑该子集；话痨/短串/降级丢术语类 → 直接校订。
+推荐 JSONL，一行一条语料：
 
-## 5. 回填与加载器
+```json
+{
+  "id": "stable-hash",
+  "source": "exact original text",
+  "context": {
+    "speaker": null,
+    "scene": null,
+    "component": null,
+    "character_limit": null,
+    "notes": null
+  },
+  "locations": [
+    {
+      "file": "path",
+      "path_id": 123,
+      "field": "dialogue.text",
+      "container": "asset or code"
+    }
+  ],
+  "placeholders": ["{0}", "<color>"],
+  "status": "untranslated"
+}
+```
 
-### 资源回填（独立目录）
-- 只从原游戏目录读取，输出到独立 overlay 目录；**禁止输出指向原游戏**。
-- 每个改动位置先验证原文匹配再写译文；写后重新读回校验；未修改对象保持原字节一致（SHA256）。
-- 生成 `patch-manifest.json`（文件级 source/patched SHA256、对象改动数、替换位置数）与运行时静态字典（base64(原文)\tbase64(译文)）。
+规则：
 
-### BepInEx 插件
-- 职责：运行时 UGUI 文本精确替换（字典按原文精确匹配，无正则/无部分匹配/无插值）+ 字体替换 + 可选取证。
-- Utage 剧情文本：资源已烘入译文，插件**只替换字体、不做运行时文本替换**（避免 typewriter 状态冲突）。
-- 字典格式：UTF-8，首行版本头（如 `# krone-offline-zh-v1`），数据行 `base64(UTF8(原文))\tbase64(UTF8(译文))`；整文件 fail-closed（坏行/重复冲突源拒载，不部分导入）；16 MiB 上限。
-- 配置项独立（General/Enabled、Fonts/UguiFontName、Fonts/RoundedTmpFontName、Evidence/DumpVisibleText）。
+- 原文按精确字节保存；生成 ID 前不做 Unicode 归一化。
+- 相同原文可合并，但必须保留全部来源位置。
+- 保留标签、占位符、分隔符、换行、转义和大小写。
+- 为 UI 文本记录长度、行数、自动换行和字体约束。
+- 区分玩家可见文本、调试文本、资源名、着色器名和内部标识符。
 
-## 6. 验证（隔离副本）
+## 4. 翻译与质量校验
 
-- 复制完整游戏到隔离目录，部署 overlay + 插件 + 字典 + 字体包（保持原目录未动）。
-- 冒烟：启动后查 BepInEx 日志（字典条数、UGUI/TMP 字体加载、钩子数、缺字/错误 0）、插件取证 `visible-ui.json`（可见中文文本）、截屏确认风格。
-- 部署前核对隔离副本资产与补丁基线哈希一致（可回滚）；先关游戏再替换 DLL。
-- 验收语言：冒烟通过 ≠ 全流程通关。交付状态写 `machine_translated_overlay_pending_review` / `pending_full_playthrough`。
+按 [translation.md](translation.md) 执行：
+
+1. 建术语表和风格说明。
+2. 选择翻译提供方：人工、本地模型、在线模型或已有翻译记忆。
+3. 小批量试译，校准风格和术语。
+4. 全量翻译。
+5. 自动校验占位符、行数、标签、术语一致性和目标语言规范。
+6. 失败条目分类处理，不做无限重试。
+
+## 5. 回填策略选择
+
+优先级如下：
+
+1. **原生本地化表**：游戏已有本地化系统时，优先新增或修改 locale。
+2. **外部数据**：直接补丁 JSON/CSV/XML 等文本数据。
+3. **序列化资产**：用 UnityPy、UABEA 或 AssetRipper 生成 overlay。
+4. **运行时 Hook**：数据不可安全修改时，用 BepInEx/MelonLoader/Harmony 挂 UI 或本地化接口。
+5. **媒体文本**：图片/音视频文本单独处理，不混入普通文本补丁。
+
+详细做法见 [backfill.md](backfill.md)。
+
+## 6. 验证
+
+在隔离副本中验证：
+
+- 原目录与交付前哈希一致
+- overlay 清单与实际文件一致
+- 未修改对象字节不变
+- 关键场景截图或取证日志
+- 字体缺字、UI 溢出、换行异常
+- 占位符和标签未被破坏
+- 游戏可启动且无新增致命错误
+
+不要把冒烟验证表述为完整通关验证。
+
+## 7. 交付物
+
+至少提供：
+
+- `inventory.json`
+- `corpus.jsonl`
+- `glossary.json`
+- `translations.jsonl`
+- `qa-report.json`
+- `patch-manifest.json`
+- 验证日志与截图索引
+- 安装/回滚说明
+
+交付说明必须列出未覆盖文本源、未验证场景和已知风险。
